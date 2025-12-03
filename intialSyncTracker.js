@@ -1,133 +1,87 @@
-// ---------- Color Helpers ----------
-const color = {
-  reset: "\x1b[0m",
-  bold: "\x1b[1m",
-  cyan: "\x1b[36m",
-  yellow: "\x1b[33m",
-  green: "\x1b[32m",
-  red: "\x1b[31m",
-  blue: "\x1b[34m",
-};
-
-// ---------- Helper: Percentage Formatter ----------
-function printPercentage(position, total, type) {
-  if (!total || total === 0) return `0/0 ${type} (0%)`;
-  const p = Math.round((position / total) * 100);
-  return `${position}/${total} ${type} (${p}%)`;
+var printPercentage = function (position, length, type) {
+  var p = Math.round((position / length) * 100, 2);
+  return position + "/" + length + " " + type + " (" + p + "%)";
 }
 
-// ---------- Helper: Milliseconds → HH:MM:SS ----------
-function msToTime(ms) {
-  const hours = String(Math.floor(ms / 3600000)).padStart(2, "0");
-  const minutes = String(Math.floor((ms % 3600000) / 60000)).padStart(2, "0");
-  const seconds = String(Math.floor((ms % 60000) / 1000)).padStart(2, "0");
-  return `${hours}:${minutes}:${seconds}`;
+var msToTime = function (duration) {
+  var milliseconds = parseInt((duration % 1000) / 100),
+    seconds = Math.floor((duration / 1000) % 60),
+    minutes = Math.floor((duration / (1000 * 60)) % 60),
+    hours = Math.floor((duration / (1000 * 60 * 60)) % 24);
+
+  hours = (hours < 10) ? "0" + hours : hours;
+  minutes = (minutes < 10) ? "0" + minutes : minutes;
+  seconds = (seconds < 10) ? "0" + seconds : seconds;
+
+  return hours + ":" + minutes + ":" + seconds + "." + milliseconds;
 }
 
-// ---------- Main Function ----------
-function initialSyncProgress() {
-  const status = db.adminCommand({ replSetGetStatus: 1, initialSync: 1 });
+var initialSyncProgress = function () {
+  var status = db.adminCommand({ replSetGetStatus: 1, initialSync: 1 });
+  
+  // *** NEW: Variables for total collection count ***
+  var total_collections = 0;
+  var total_collections_cloned = 0;
+  
+  var dbs_cloned = status.initialSyncStatus.databases.databasesCloned;
+  delete status.initialSyncStatus.databases.databasesCloned;
+  var dbs = Object.keys(status.initialSyncStatus.databases);
+  var dbs_total = dbs.length;
 
-  if (!status.initialSyncStatus) {
-    print(color.red + "Initial sync is not currently running." + color.reset);
-    return;
-  }
+  var elapsedMillis = 0;
+  var currentlyCloningStatus = "";
 
-  const sync = status.initialSyncStatus;
-  const dbNames = Object.keys(sync.databases || {});
-  const totalDBs = dbNames.length;
-  const clonedDBs = sync.databases.databasesCloned || 0;
+  for (var i = 0; i < dbs_total; i++) {
+    var d = status.initialSyncStatus.databases[dbs[i]];
+    
+    // *** NEW: Accumulate total collection counts ***
+    total_collections += d.collections;
+    total_collections_cloned += d.clonedCollections;
 
-  let elapsedMillis = 0;
-  let cloningStatus = "";
-  let currentDB = "";
-  let currentCollection = "";
-
-  // ---------- Loop through each database ----------
-  dbNames.forEach(dbName => {
-    const dbInfo = sync.databases[dbName];
-
-    if (!dbInfo || typeof dbInfo === "number") return;
-
-    // If this DB is currently cloning
-    if (dbInfo.clonedCollections < dbInfo.collections) {
-      currentDB = dbName;
-      cloningStatus +=
-        `\n${color.blue}${color.bold}→ Cloning database:${color.reset} ${dbName}\n`;
-      cloningStatus +=
-        `   ${printPercentage(dbInfo.clonedCollections, dbInfo.collections, "collections")}`;
-
-      // Find active collection
-      Object.keys(dbInfo).forEach(coll => {
-        const c = dbInfo[coll];
-        if (c && typeof c === "object" &&
-            c.documentsToCopy &&
-            c.documentsCopied < c.documentsToCopy) {
-
-          currentCollection = coll;
-          cloningStatus += `\n   ${color.cyan}Cloning collection:${color.reset} ${coll}\n`;
-          cloningStatus +=
-            `   ${printPercentage(c.documentsCopied, c.documentsToCopy, "documents")}`;
+    // if the counts aren't the same either it's the database that's in progress or
+    // hasn't started cloning yet
+    if (d.clonedCollections < d.collections) {
+      currentlyCloningStatus = "Cloning database " + dbs[i];
+      currentlyCloningStatus += " - cloned " + printPercentage(d.clonedCollections, d.collections, "collections");
+      var collectionKeys = Object.keys(d);
+      for (var j = 0; j < collectionKeys.length; j++) {
+        var c = d[collectionKeys[j]];
+        if (c && c.hasOwnProperty("documentsToCopy") && (c.documentsCopied < c.documentsToCopy)) { // Added null/undefined check for 'c'
+          currentlyCloningStatus += "\nCloning collection " + collectionKeys[j] + " " + printPercentage(c.documentsCopied, c.documentsToCopy, "documents");
         }
-      });
+      }
     }
-
-    // Add elapsed time
-    if (dbInfo.elapsedMillis) elapsedMillis += dbInfo.elapsedMillis;
-  });
-
-  // ---------- Header ----------
-  print(color.bold + "====================" + color.reset);
-  print(color.bold + " Initial Sync Status" + color.reset);
-  print(color.bold + "====================" + color.reset);
-
-  // ---------- Start time ----------
-  const start = sync.initialSyncStart;
-  const now = new Date();
-  print(`Cloning started at: ${color.yellow}${start}${color.reset}`);
-  print(`Elapsed: ${color.green}${msToTime(now - start)}${color.reset}`);
-
-  // ---------- Compare with PRIMARY optime ----------
-  const primary = status.members.find(m => m.stateStr === "PRIMARY");
-  if (primary) {
-    const lag = primary.optimeDate - start;
-    print(
-      `Lag behind PRIMARY (optime): ${color.green}${msToTime(lag)}${color.reset}`
-    );
+    // only add time if there's time to record
+    if (d.hasOwnProperty("elapsedMillis")) {
+      elapsedMillis += d.elapsedMillis;
+    }
   }
-
-  // ---------- Failures handling ----------
-  if (sync.initialSyncAttempts && sync.initialSyncAttempts.length > 0) {
-    const failCount = sync.initialSyncAttempts.length;
-    print(
-      `${color.red}Cloning has failed ${failCount} time(s) previously.${color.reset}`
-    );
-    print(
-      `${color.red}Last failure:${color.reset} ${sync.initialSyncAttempts[failCount - 1].status}`
-    );
+  print("===================")
+  print("Initial Sync Status")
+  print("===================")
+  var now = new Date();
+  var started = status.initialSyncStatus.initialSyncStart;
+  print("Cloning started at " + started + " (" + msToTime(now - started) + " ago)");
+  var members = status.members;
+  for (var i = 0; i < members.length; i++) {
+    if (members[i].stateStr == "PRIMARY") {
+      var optime = members[i].optimeDate
+      var me = new Date(status.initialSyncStatus.initialSyncStart.getTime());
+      print("Currently " + msToTime(optime - me) + " behind the PRIMARY (based on optimes)");
+    }
   }
-
-  // ---------- DB-Level Summary ----------
-  print("\n" + color.bold + "Database Progress:" + color.reset);
-  print(
-    color.green +
-    `Cloned ${printPercentage(clonedDBs, totalDBs, "databases")}` +
-    color.reset
-  );
-
-  // ---------- Active Cloning Info ----------
-  if (currentDB) {
-    print("\n" + color.bold + "Currently Cloning:" + color.reset);
-    print(cloningStatus);
-  } else {
-    print(color.green + "All databases appear cloned." + color.reset);
+  if (status.initialSyncStatus.hasOwnProperty("initialSyncAttempts") && status.initialSyncStatus.initialSyncAttempts.length > 0) {
+    var failures = status.initialSyncStatus.initialSyncAttempts.length;
+    print("Cloning has already failed " + failures + " time(s) ...");
+    print("Last Failure: " + status.initialSyncStatus.initialSyncAttempts[failures - 1].status);
   }
-
-  // ---------- Total elapsed time in DB cloning ----------
-  print(
-    `\nTotal DB clone time recorded: ${color.green}${msToTime(elapsedMillis)}${color.reset}`
-  );
+  print("Copying databases for " + msToTime(elapsedMillis) + ". Note this updates AFTER a collection has been cloned.");
+  
+  // *** NEW OUTPUT LINE ***
+  print("Cloned " + printPercentage(total_collections_cloned, total_collections, "collections total"));
+  
+  print("Cloned " + printPercentage(dbs_cloned, dbs_total, "databases"));
+  print(currentlyCloningStatus);
 }
 
-// Auto-run when file is loaded
 initialSyncProgress();
